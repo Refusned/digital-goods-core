@@ -115,6 +115,17 @@ test('оплата без суммы или без валюты отклоняе
   });
   assert.equal(noDate.status, 400);
 
+  const numericDate = await http.post('/webhook/payment', {
+    ...paidEvent(order.id, order.amount), created_at: 0,
+  });
+  assert.equal(numericDate.status, 400, 'created_at обязан быть строкой с датой');
+
+  const failedWithoutMoney = await http.post('/webhook/payment', {
+    event_id: `e_${Math.random().toString(36).slice(2)}`, order_id: order.id,
+    status: 'failed', created_at: new Date().toISOString(),
+  });
+  assert.equal(failedWithoutMoney.status, 400, 'контракт требует сумму и валюту и для failed');
+
   const { body } = await http.get(`/orders/${order.id}`);
   assert.equal(body.status, 'created');
   const { rows } = await pool.query('SELECT count(*)::int AS n FROM payment_events WHERE order_id = $1', [order.id]);

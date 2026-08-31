@@ -12,7 +12,7 @@
     "seed": "node scripts/seed.js",
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "test": "node scripts/test.js",
     "race": "node scripts/race-check.js",
     "bench:catalog": "node scripts/bench-catalog.js"
   },

@@ -53,8 +53,10 @@ export async function deliverOrder(orderId, { trigger = 'unknown' } = {}) {
       return { outcome: 'not_payable', status: order.status };
     }
 
+    // next_attempt_at здесь НЕ обнуляется: это аренда задачи, выданная воркером,
+    // и она должна действовать всё время сетевых вызовов. Снимается только в финале.
     await pool.query(
-      `UPDATE orders SET status = 'delivering', attempts = attempts + 1, next_attempt_at = NULL, updated_at = now()
+      `UPDATE orders SET status = 'delivering', attempts = attempts + 1, updated_at = now()
         WHERE id = $1`,
       [orderId],
     );
@@ -229,15 +231,17 @@ async function finalizeDelivery(order, { code, supplier, requestId }) {
  */
 export async function syncStock(sku) {
   let total = 0;
-  let known = false;
 
   for (const supplier of [config.suppliers.a, config.suppliers.b]) {
     const items = await fetchStock(supplier, sku);
-    if (items === null) continue;                 // поставщик молчит: его вклад не учитываем
-    known = true;
+    if (items === null) {
+      // Молчание поставщика это не ноль на его складе. Записать сумму по остальным значило бы
+      // занизить витрину и спрятать товар, который на самом деле есть.
+      log.warn('stock.sync_skipped', { sku, supplier: supplier.name, reason: 'no_response' });
+      return null;
+    }
     for (const item of items) if (!sku || item.sku === sku) total += Number(item.available || 0);
   }
-  if (!known) return null;                        // ни один поставщик не ответил, проекцию не трогаем
 
   await pool.query(
     `INSERT INTO product_stock (sku, available) VALUES ($1, $2)

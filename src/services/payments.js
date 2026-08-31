@@ -20,8 +20,8 @@ function parseWebhook(payload) {
   if (typeof orderId !== 'string' || !ID_RE.test(orderId)) throw new ApiError(400, 'bad_webhook', 'order_id: непустая строка до 128 символов');
   if (!VALID_STATUSES.has(status)) throw new ApiError(400, 'bad_webhook', 'status: paid или failed');
 
-  if (payload.created_at === undefined || payload.created_at === null) {
-    throw new ApiError(400, 'bad_webhook', 'created_at обязателен');
+  if (typeof payload.created_at !== 'string' || payload.created_at.trim() === '') {
+    throw new ApiError(400, 'bad_webhook', 'created_at: строка с датой в ISO 8601');
   }
   const occurredAt = new Date(payload.created_at);
   if (Number.isNaN(occurredAt.getTime())) throw new ApiError(400, 'bad_webhook', 'created_at не разбирается как дата');
@@ -39,12 +39,17 @@ function parseWebhook(payload) {
       throw new ApiError(400, 'bad_webhook', 'currency: код из трёх букв');
     }
     currency = currency.toUpperCase();
-  } else if (payload.amount !== undefined && payload.amount !== null) {
-    if (typeof payload.amount !== 'number' || !Number.isSafeInteger(payload.amount)) {
-      throw new ApiError(400, 'bad_webhook', 'amount: целое число');
+  } else {
+    // Для failed сумма и валюта тоже обязательны: контракт платёжной системы содержит их всегда,
+    // и молчаливый приём неполного события прячет ошибку интеграции.
+    if (typeof payload.amount !== 'number' || !Number.isSafeInteger(payload.amount) || payload.amount < 0) {
+      throw new ApiError(400, 'bad_webhook', 'amount: целое число, не меньше нуля');
+    }
+    if (typeof payload.currency !== 'string' || !/^[A-Za-z]{3}$/.test(payload.currency)) {
+      throw new ApiError(400, 'bad_webhook', 'currency: код из трёх букв');
     }
     amountMinor = payload.amount;
-    currency = typeof payload.currency === 'string' ? payload.currency.toUpperCase() : null;
+    currency = payload.currency.toUpperCase();
   }
 
   return { eventId, orderId, status, occurredAt, amountMinor, currency };

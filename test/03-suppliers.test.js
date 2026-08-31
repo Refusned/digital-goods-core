@@ -259,3 +259,45 @@ test('витринный остаток пересчитывается по ск
   assert.equal(afterStock.rows[0].available, afterFree.rows[0].n, 'после выдачи витрина снова совпадает со складом');
   assert.equal(afterStock.rows[0].available, beforeStock.rows[0].available - 1);
 });
+
+test('завоз через админку кладёт ключи поставщику, а не рисует остаток на витрине', async () => {
+  const before = await supplierStats(stack.supplierBase.A);
+  const res = await http2post('/admin/stock/KEY-GTA5/restock', { codes: ['ADMIN-RESTOCK-1', 'ADMIN-RESTOCK-2'] });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.added, 2);
+
+  const after = await supplierStats(stack.supplierBase.A);
+  assert.equal(after.free - before.free, 2, 'ключи реально появились на складе поставщика');
+
+  const stock = await pool.query(`SELECT available FROM product_stock WHERE sku = 'KEY-GTA5'`);
+  const free = await pool.query(
+    `SELECT count(*)::int AS n FROM supplier_stub.keys WHERE sku = 'KEY-GTA5' AND taken_by IS NULL`);
+  assert.equal(stock.rows[0].available, free.rows[0].n, 'витрина совпадает с фактическим остатком складов');
+});
+
+test('молчание поставщика не занижает витрину', async () => {
+  const stockBefore = await pool.query(`SELECT available FROM product_stock WHERE sku = 'KEY-CS2-PRIME'`);
+
+  const realB = process.env.SUPPLIER_B_URL;
+  const probe = http.createServer(() => {});
+  await new Promise((r) => probe.listen(0, '127.0.0.1', r));
+  const deadPort = probe.address().port;
+  await new Promise((r) => probe.close(r));
+  process.env.SUPPLIER_B_URL = `http://127.0.0.1:${deadPort}`;
+
+  try {
+    const { body: order } = await http2post('/orders', { sku: 'KEY-CS2-PRIME' });
+    await http2post('/webhook/payment', paidEvent(order.id, order.amount));
+    await waitFor(async () => {
+      const { body } = await http2get(`/orders/${order.id}`);
+      return body.status === 'delivered' ? body : null;
+    });
+
+    const stockAfter = await pool.query(`SELECT available FROM product_stock WHERE sku = 'KEY-CS2-PRIME'`);
+    assert.equal(stockAfter.rows[0].available, stockBefore.rows[0].available,
+      'пока часть складов молчит, проекция остаётся прежней, а не падает до суммы ответивших');
+  } finally {
+    process.env.SUPPLIER_B_URL = realB;
+  }
+});
