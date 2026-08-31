@@ -156,11 +156,14 @@ CREATE SCHEMA IF NOT EXISTS supplier_stub;
 CREATE TABLE IF NOT EXISTS supplier_stub.keys (
   id       BIGSERIAL PRIMARY KEY,
   supplier TEXT NOT NULL,
+  sku      TEXT,                 -- у каждого поставщика свой склад по товарам
   code     TEXT NOT NULL,
   taken_by TEXT,
   UNIQUE (supplier, code)
 );
 
+-- Индекс по (supplier, sku, id) появляется в миграции 002: так файл остаётся применимым
+-- и к базам, созданным до появления колонки sku.
 CREATE INDEX IF NOT EXISTS supplier_stub_free_keys_idx
   ON supplier_stub.keys (supplier, id)
   WHERE taken_by IS NULL;

@@ -37,11 +37,33 @@ export async function startStack({ worker = false, workerIntervalMs = 150 } = {}
   };
 }
 
-/** Полная очистка данных перед сценарием. Каталог и пулы ключей засеваются заново. */
-export async function resetData({ keysA = 5, keysB = 5, stock = 10 } = {}) {
-  await pool.query('TRUNCATE deliveries, supplier_requests, ledger_entries, payment_events, orders CASCADE');
-  await pool.query('TRUNCATE supplier_stub.issued');
-  await pool.query('TRUNCATE supplier_stub.keys RESTART IDENTITY');
+const SKUS = ['KEY-CS2-PRIME', 'KEY-GTA5', 'STEAM-TOPUP-500'];
+
+
+/**
+ * Очистка таблиц между сценариями.
+ * Выдача запускается в фоне (её дёргает вебхук и не ждёт), поэтому к моменту очистки
+ * фоновая транзакция может ещё держать строки. Это гонка теста, а не приложения:
+ * ждём и повторяем, вместо того чтобы прятать её паузой наугад.
+ */
+async function truncateWithRetry(sql, attempts = 10) {
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      await pool.query(sql);
+      return;
+    } catch (err) {
+      const busy = err.code === '40P01' || err.code === '55P03';   // deadlock, lock_not_available
+      if (!busy || i === attempts) throw err;
+      await sleep(120);
+    }
+  }
+}
+
+/** Полная очистка данных перед сценарием. Каталог и склады поставщиков засеваются заново. */
+export async function resetData({ keysA = 5, keysB = 5 } = {}) {
+  await truncateWithRetry('TRUNCATE deliveries, supplier_requests, ledger_entries, payment_events, orders CASCADE');
+  await truncateWithRetry('TRUNCATE supplier_stub.issued');
+  await truncateWithRetry('TRUNCATE supplier_stub.keys RESTART IDENTITY');
 
   await pool.query(
     `INSERT INTO products (sku, name, type, price_minor, currency, popularity)
@@ -50,21 +72,26 @@ export async function resetData({ keysA = 5, keysB = 5, stock = 10 } = {}) {
             ('STEAM-TOPUP-500', 'Пополнение Steam 500 ₽', 'topup', 500, 'RUB', 80)
      ON CONFLICT (sku) DO UPDATE SET is_active = TRUE`,
   );
-  for (const sku of ['KEY-CS2-PRIME', 'KEY-GTA5', 'STEAM-TOPUP-500']) {
-    await pool.query(
-      `INSERT INTO product_stock (sku, available) VALUES ($1, $2)
-       ON CONFLICT (sku) DO UPDATE SET available = EXCLUDED.available, updated_at = now()`,
-      [sku, stock],
-    );
+
+  // Ключи лежат на складах поставщиков и привязаны к товару: витрина потом строится по ним.
+  const mk = (prefix, n) => Array.from({ length: n }, (_, i) => `${prefix}-${String(i + 1).padStart(4, '0')}`);
+  for (const sku of SKUS) {
+    for (const code of mk(`AAAA-${sku}`, keysA)) {
+      await pool.query('INSERT INTO supplier_stub.keys (supplier, sku, code) VALUES ($1, $2, $3)', ['A', sku, code]);
+    }
+    for (const code of mk(`BBBB-${sku}`, keysB)) {
+      await pool.query('INSERT INTO supplier_stub.keys (supplier, sku, code) VALUES ($1, $2, $3)', ['B', sku, code]);
+    }
   }
 
-  const mk = (prefix, n) => Array.from({ length: n }, (_, i) => `${prefix}-${String(i + 1).padStart(4, '0')}`);
-  for (const code of mk('AAAA', keysA)) {
-    await pool.query('INSERT INTO supplier_stub.keys (supplier, code) VALUES ($1, $2)', ['A', code]);
-  }
-  for (const code of mk('BBBB', keysB)) {
-    await pool.query('INSERT INTO supplier_stub.keys (supplier, code) VALUES ($1, $2)', ['B', code]);
-  }
+  await pool.query(
+    `INSERT INTO product_stock (sku, available)
+     SELECT p.sku, COALESCE(k.free, 0)
+       FROM products p
+       LEFT JOIN (SELECT sku, count(*) FILTER (WHERE taken_by IS NULL)::int AS free
+                    FROM supplier_stub.keys GROUP BY sku) k ON k.sku = p.sku
+     ON CONFLICT (sku) DO UPDATE SET available = EXCLUDED.available, updated_at = now()`,
+  );
 }
 
 export const api = (base) => ({
@@ -82,9 +109,9 @@ export const chaos = (supplierUrl, payload) =>
 
 export const supplierStats = (supplierUrl) => fetch(`${supplierUrl}/_stats`).then((r) => r.json());
 
-export const restock = (supplierUrl, codes) =>
+export const restock = (supplierUrl, sku, codes) =>
   fetch(`${supplierUrl}/_restock`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ codes }),
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sku, codes }),
   }).then((r) => r.json());
 
 export async function waitFor(fn, { timeoutMs = 8000, everyMs = 60 } = {}) {

@@ -15,6 +15,8 @@ const base = process.env.API_URL || `http://127.0.0.1:${process.env.PORT || 3010
 const db = new pg.Client({ connectionString: process.env.DATABASE_URL || 'postgres://shop:shop@localhost:5442/shop' });
 await db.connect();
 
+process.stdout.write('Сценарии выполняются против ЗАПУЩЕННОГО сервера и создают в его базе реальные заказы.\n\n');
+
 const post = (path, body, headers = {}) =>
   fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) })
     .then(async (r) => ({ status: r.status, body: await r.json().catch(() => ({})) }));
@@ -50,16 +52,21 @@ const check = (name, ok, details) => {
     created_at: new Date().toISOString(),
   }));
   const before = await db.query(`SELECT count(*)::int AS n FROM supplier_stub.issued`);
-  await Promise.all(payloads.map((p) => post('/webhook/payment', p)));
+  const responses = await Promise.all(payloads.map((p) => post('/webhook/payment', p)));
+  const allAccepted = responses.every((r) => r.status === 200);
   const final = await waitFor(order.id, ['delivered']);
   const after = await db.query(`SELECT count(*)::int AS n FROM supplier_stub.issued`);
   const deliveries = await db.query('SELECT count(*)::int AS n FROM deliveries WHERE order_id = $1', [order.id]);
   const applied = await db.query(`SELECT count(*)::int AS n FROM payment_events WHERE order_id = $1 AND outcome = 'applied'`, [order.id]);
 
-  check('50 параллельных вебхуков -> ровно одна выдача', deliveries.rows[0].n === 1 && final.status === 'delivered', {
-    order: order.id, status: final.status, deliveries: deliveries.rows[0].n,
-    keys_consumed: after.rows[0].n - before.rows[0].n, applied_events: applied.rows[0].n, code: final.delivery?.code,
-  });
+  const keysConsumed = after.rows[0].n - before.rows[0].n;
+  check('50 параллельных вебхуков -> ровно одна выдача и ровно один ключ',
+    allAccepted && deliveries.rows[0].n === 1 && final.status === 'delivered'
+      && keysConsumed === 1 && applied.rows[0].n === 1,
+    {
+      order: order.id, status: final.status, all_http_200: allAccepted, deliveries: deliveries.rows[0].n,
+      keys_consumed: keysConsumed, applied_events: applied.rows[0].n,
+    });
 }
 
 // --- Сценарий 2: повтор того же event_id ------------------------------------
@@ -73,9 +80,11 @@ const check = (name, ok, details) => {
   const final = await waitFor(order.id, ['delivered']);
   const stored = await db.query('SELECT count(*)::int AS n FROM payment_events WHERE event_id = $1', [event.event_id]);
   const deliveries = await db.query('SELECT count(*)::int AS n FROM deliveries WHERE order_id = $1', [order.id]);
-  check('20 повторов одного event_id -> одно событие, одна выдача',
-    stored.rows[0].n === 1 && deliveries.rows[0].n === 1 && final.status === 'delivered',
-    { order: order.id, stored_events: stored.rows[0].n, deliveries: deliveries.rows[0].n, status: final.status });
+  const issued = await db.query('SELECT count(*)::int AS n FROM supplier_stub.issued WHERE order_id = $1', [order.id]);
+  check('20 повторов одного event_id -> одно событие, одна выдача, один ключ',
+    stored.rows[0].n === 1 && deliveries.rows[0].n === 1 && issued.rows[0].n === 1 && final.status === 'delivered',
+    { order: order.id, stored_events: stored.rows[0].n, deliveries: deliveries.rows[0].n,
+      supplier_issued: issued.rows[0].n, status: final.status });
 }
 
 // --- Сценарий 3: вебхук раньше заказа --------------------------------------
@@ -99,26 +108,57 @@ const check = (name, ok, details) => {
     { order: orderId, webhook_http: early.status, was_orphan: orphanBefore, final_status: final.status, deliveries: deliveries.rows[0].n });
 }
 
-// --- Сценарий 4: вебхуки не по порядку (failed после paid) ------------------
+// --- Сценарий 4: порядок доставки не влияет на итог ------------------------
 {
-  const orderId = `ord_ooo_${Math.random().toString(36).slice(2, 8)}`;
-  const { body: order } = await post('/orders', { sku: 'KEY-GTA5', order_id: orderId });
-  const t0 = new Date();
-  const older = new Date(t0.getTime() - 60_000).toISOString();
+  const outcomes = [];
+  for (const mode of ['paid_first', 'failed_first']) {
+    const orderId = `ord_ooo_${mode}_${Math.random().toString(36).slice(2, 6)}`;
+    const { body: order } = await post('/orders', { sku: 'KEY-GTA5', order_id: orderId });
+    const sameTime = new Date().toISOString();
 
-  await post('/webhook/payment', {
-    event_id: `ooo_paid_${orderId}`, order_id: orderId, status: 'paid',
-    amount: order.amount, currency: 'RUB', created_at: t0.toISOString(),
-  });
-  const stale = await post('/webhook/payment', {
-    event_id: `ooo_failed_${orderId}`, order_id: orderId, status: 'failed',
-    amount: order.amount, currency: 'RUB', created_at: older,
-  });
-  const final = await waitFor(orderId, ['delivered']);
+    const paidEvt = {
+      event_id: `ooo_paid_${orderId}`, order_id: orderId, status: 'paid',
+      amount: order.amount, currency: 'RUB', created_at: sameTime,
+    };
+    const failedEvt = {
+      event_id: `ooo_failed_${orderId}`, order_id: orderId, status: 'failed',
+      amount: order.amount, currency: 'RUB', created_at: sameTime,
+    };
 
-  check('устаревший failed после paid не отменяет заказ',
-    final.status === 'delivered' && stale.body.outcome === 'stale',
-    { order: orderId, stale_outcome: stale.body.outcome, final_status: final.status });
+    if (mode === 'paid_first') {
+      await post('/webhook/payment', paidEvt);
+      await post('/webhook/payment', failedEvt);
+    } else {
+      await post('/webhook/payment', failedEvt);
+      await post('/webhook/payment', paidEvt);
+    }
+
+    // Проверяем именно судьбу ОПЛАТЫ: дошёл ли заказ до выдачи, зависит ещё и от наличия ключей.
+    const final = await waitFor(orderId, ['delivered', 'out_of_stock', 'delivery_failed', 'payment_failed']);
+    outcomes.push({ mode, status: final.status, paid: Boolean(final.paid_at) });
+  }
+
+  check('одинаковый набор событий даёт один итог при любом порядке доставки',
+    outcomes.every((o) => o.paid && o.status !== 'payment_failed'), { outcomes });
+}
+
+// --- Сценарий 5: оплата без суммы или в чужой валюте не проходит ------------
+{
+  const { body: order } = await post('/orders', { sku: 'KEY-CS2-PRIME' });
+
+  const noAmount = await post('/webhook/payment', {
+    event_id: `bad_amt_${order.id}`, order_id: order.id, status: 'paid',
+    currency: 'RUB', created_at: new Date().toISOString(),
+  });
+  const wrongCurrency = await post('/webhook/payment', {
+    event_id: `bad_cur_${order.id}`, order_id: order.id, status: 'paid',
+    amount: order.amount, currency: 'USD', created_at: new Date().toISOString(),
+  });
+  const { body: after } = await get(`/orders/${order.id}`);
+
+  check('оплата без суммы отклоняется, оплата в чужой валюте не выдаёт товар',
+    noAmount.status === 400 && wrongCurrency.body.outcome === 'currency_mismatch' && after.status === 'created',
+    { no_amount_http: noAmount.status, wrong_currency: wrongCurrency.body.outcome, order_status: after.status });
 }
 
 // --- Итог -------------------------------------------------------------------

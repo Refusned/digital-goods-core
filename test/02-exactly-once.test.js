@@ -86,24 +86,73 @@ test('вебхук пришёл раньше заказа -> платёж не �
   assert.equal(deliveries.rows[0].n, 1);
 });
 
-test('вебхуки не по порядку: устаревший failed не отменяет оплаченный заказ', async () => {
+test('failed после paid не отменяет оплаченный заказ', async () => {
   const orderId = `ord_ord_${Math.random().toString(36).slice(2, 8)}`;
   const { body: order } = await http.post('/orders', { sku: 'KEY-CS2-PRIME', order_id: orderId });
 
   const now = new Date();
   await http.post('/webhook/payment', paidEvent(orderId, order.amount, { created_at: now.toISOString() }));
 
-  const stale = await http.post('/webhook/payment', {
+  const late = await http.post('/webhook/payment', {
     ...paidEvent(orderId, order.amount, { created_at: new Date(now.getTime() - 60_000).toISOString() }),
     status: 'failed',
   });
-  assert.equal(stale.body.outcome, 'stale');
+  assert.equal(late.body.outcome, 'ignored_after_paid');
 
   const delivered = await waitFor(async () => {
     const { body } = await http.get(`/orders/${orderId}`);
     return body.status === 'delivered' ? body : null;
   });
   assert.ok(delivered);
+});
+
+test('итог не зависит от порядка доставки: обе перестановки paid и failed дают оплаченный заказ', async () => {
+  const results = [];
+
+  for (const order of ['paid_first', 'failed_first']) {
+    const orderId = `ord_perm_${order}_${Math.random().toString(36).slice(2, 6)}`;
+    const { body } = await http.post('/orders', { sku: 'KEY-CS2-PRIME', order_id: orderId });
+    const t = new Date();
+
+    const paid = paidEvent(orderId, body.amount, { created_at: t.toISOString() });
+    const failed = { ...paidEvent(orderId, body.amount, { created_at: t.toISOString() }), status: 'failed' };
+
+    if (order === 'paid_first') {
+      await http.post('/webhook/payment', paid);
+      await http.post('/webhook/payment', failed);
+    } else {
+      await http.post('/webhook/payment', failed);
+      await http.post('/webhook/payment', paid);
+    }
+
+    const final = await waitFor(async () => {
+      const { body: o } = await http.get(`/orders/${orderId}`);
+      return o.status === 'delivered' ? o : null;
+    });
+    results.push({ order, status: final?.status, paid_at: Boolean(final?.paid_at) });
+  }
+
+  assert.deepEqual(results.map((r) => r.status), ['delivered', 'delivered'],
+    'одинаковый набор событий обязан давать одинаковый итог при любом порядке');
+  assert.ok(results.every((r) => r.paid_at));
+});
+
+test('одинаковое время событий не теряет успешную оплату', async () => {
+  const orderId = `ord_same_${Math.random().toString(36).slice(2, 8)}`;
+  const { body: order } = await http.post('/orders', { sku: 'KEY-GTA5', order_id: orderId });
+  const sameTime = new Date().toISOString();
+
+  await http.post('/webhook/payment', {
+    ...paidEvent(orderId, order.amount, { created_at: sameTime }), status: 'failed',
+  });
+  const paid = await http.post('/webhook/payment', paidEvent(orderId, order.amount, { created_at: sameTime }));
+  assert.equal(paid.body.outcome, 'applied', 'оплата с тем же временем не должна отбрасываться');
+
+  const delivered = await waitFor(async () => {
+    const { body } = await http.get(`/orders/${orderId}`);
+    return body.status === 'delivered' ? body : null;
+  });
+  assert.ok(delivered, 'заказ обязан быть оплачен и выдан');
 });
 
 test('параллельные вебхуки по РАЗНЫМ заказам не мешают друг другу', async () => {

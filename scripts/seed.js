@@ -24,24 +24,30 @@ for (const p of catalog.products) {
             currency = EXCLUDED.currency, image = EXCLUDED.image`,
     [p.sku, p.name, p.type, p.price, p.currency, p.image, popularity--],
   );
+}
+
+// Пул ключей раскладываем по товарам и делим между двумя независимыми поставщиками:
+// у каждого поставщика свой склад, один код принадлежит ровно одному складу и одному SKU.
+const skus = catalog.products.map((p) => p.sku);
+for (const [idx, code] of keyPool.keys.entries()) {
+  const supplier = idx % 2 === 0 ? 'A' : 'B';
+  const sku = skus[idx % skus.length];
   await pool.query(
-    `INSERT INTO product_stock (sku, available) VALUES ($1, $2)
-     ON CONFLICT (sku) DO UPDATE SET available = EXCLUDED.available, updated_at = now()`,
-    [p.sku, 25],
+    `INSERT INTO supplier_stub.keys (supplier, sku, code) VALUES ($1, $2, $3)
+     ON CONFLICT (supplier, code) DO NOTHING`,
+    [supplier, sku, code],
   );
 }
 
-// Пул ключей делим между двумя независимыми поставщиками.
-const half = Math.ceil(keyPool.keys.length / 2);
-const split = { A: keyPool.keys.slice(0, half), B: keyPool.keys.slice(half) };
-for (const [supplier, codes] of Object.entries(split)) {
-  for (const code of codes) {
-    await pool.query(
-      'INSERT INTO supplier_stub.keys (supplier, code) VALUES ($1, $2) ON CONFLICT (supplier, code) DO NOTHING',
-      [supplier, code],
-    );
-  }
-}
+// Витрина это проекция складов поставщиков, а не отдельная выдумка.
+await pool.query(
+  `INSERT INTO product_stock (sku, available)
+   SELECT p.sku, COALESCE(k.free, 0)
+     FROM products p
+     LEFT JOIN (SELECT sku, count(*) FILTER (WHERE taken_by IS NULL)::int AS free
+                  FROM supplier_stub.keys GROUP BY sku) k ON k.sku = p.sku
+   ON CONFLICT (sku) DO UPDATE SET available = EXCLUDED.available, updated_at = now()`,
+);
 
 const counts = await pool.query(
   `SELECT (SELECT count(*) FROM products) AS products,

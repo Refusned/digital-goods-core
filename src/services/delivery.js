@@ -2,7 +2,7 @@ import { pool, withTx, isUniqueViolation } from '../db.js';
 import { config } from '../config.js';
 import { supplierRequestId } from '../ids.js';
 import { log } from '../logger.js';
-import { issue } from '../suppliers/client.js';
+import { issue, fetchStock } from '../suppliers/client.js';
 import { recordDelivery } from './ledger.js';
 import { markRecoverable } from './orders.js';
 
@@ -71,7 +71,10 @@ export async function deliverOrder(orderId, { trigger = 'unknown' } = {}) {
     const result = await acquireCode(order);
 
     if (result.outcome === 'ok') {
-      return await finalizeDelivery(order, result);
+      const delivered = await finalizeDelivery(order, result);
+      // Витрина обязана показывать реальный остаток поставщиков, а не собственную догадку.
+      await syncStock(order.sku);
+      return delivered;
     }
 
     if (result.outcome === 'retry_later') {
@@ -81,7 +84,7 @@ export async function deliverOrder(orderId, { trigger = 'unknown' } = {}) {
     }
 
     const outOfStock = result.reasons.some((r) => String(r.reason).includes('out_of_stock'));
-    if (outOfStock) await markStockEmpty(order.sku);
+    if (outOfStock) await syncStock(order.sku);
 
     await markRecoverable(
       orderId,
@@ -128,11 +131,20 @@ async function acquireCode(order) {
         await upsertSupplierRequest(requestId, order.id, supplier.name, 'ok', { code: last.code, attempts: attempt });
         return { outcome: 'ok', code: last.code, supplier: supplier.name, requestId };
       }
+
       if (last.outcome === 'failed') {
+        // 5xx это временная беда поставщика: повторяем к нему же с тем же request_id и бэкоффом.
+        // Контрактный отказ (4xx, нет остатка, недоступен) разбирать смысла нет, уходим к резервному.
+        if (last.retryable && attempt < config.supplierMaxAttempts) {
+          await upsertSupplierRequest(requestId, order.id, supplier.name, 'retryable', { reason: last.reason, attempts: attempt });
+          await sleep(config.supplierBackoffBaseMs * 2 ** (attempt - 1));
+          continue;
+        }
         await upsertSupplierRequest(requestId, order.id, supplier.name, 'failed', { reason: last.reason, attempts: attempt });
         reasons.push({ supplier: supplier.name, reason: last.reason });
         break;
       }
+
       // unknown: повторяем с ТЕМ ЖЕ request_id, поставщик обязан вернуть тот же код
       await upsertSupplierRequest(requestId, order.id, supplier.name, 'unknown', { reason: last.reason, attempts: attempt });
       if (attempt < config.supplierMaxAttempts) await sleep(config.supplierBackoffBaseMs * 2 ** (attempt - 1));
@@ -197,12 +209,10 @@ async function finalizeDelivery(order, { code, supplier, requestId }) {
       [order.id],
     );
     await recordDelivery(client, order.id, order.amount_minor);
-    await client.query(
-      `UPDATE product_stock SET available = GREATEST(available - 1, 0), updated_at = now() WHERE sku = $1`,
-      [order.sku],
-    );
 
-    log.info('delivery.done', { order_id: order.id, sku: order.sku, supplier, request_id: requestId, code });
+    log.info('delivery.done', {
+      order_id: order.id, sku: order.sku, supplier, request_id: requestId, code: maskCode(code),
+    });
     return { outcome: 'delivered', code, supplier };
   }).catch(async (err) => {
     if (err.code_collision) {
@@ -213,12 +223,31 @@ async function finalizeDelivery(order, { code, supplier, requestId }) {
   });
 }
 
-async function markStockEmpty(sku) {
+/**
+ * Пересчёт витринного остатка по фактическим складам поставщиков.
+ * Единственный источник истины про наличие это поставщики, витрина только проекция.
+ */
+export async function syncStock(sku) {
+  let total = 0;
+  let known = false;
+
+  for (const supplier of [config.suppliers.a, config.suppliers.b]) {
+    const items = await fetchStock(supplier, sku);
+    if (items === null) continue;                 // поставщик молчит: его вклад не учитываем
+    known = true;
+    for (const item of items) if (!sku || item.sku === sku) total += Number(item.available || 0);
+  }
+  if (!known) return null;                        // ни один поставщик не ответил, проекцию не трогаем
+
   await pool.query(
-    `INSERT INTO product_stock (sku, available) VALUES ($1, 0)
-     ON CONFLICT (sku) DO UPDATE SET available = 0, updated_at = now()`,
-    [sku],
+    `INSERT INTO product_stock (sku, available) VALUES ($1, $2)
+     ON CONFLICT (sku) DO UPDATE SET available = EXCLUDED.available, updated_at = now()`,
+    [sku, total],
   );
+  return total;
 }
+
+/** В логах должен быть след выдачи, но не сам товар. */
+const maskCode = (code) => (typeof code === 'string' && code.length > 4 ? `***${code.slice(-4)}` : '***');
 
 const backoffMs = (attempt) => Math.min(config.supplierBackoffBaseMs * 2 ** Math.min(attempt, 6), 30_000);

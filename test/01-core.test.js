@@ -38,7 +38,7 @@ test('оплата по вебхуку доводит заказ до выдан
   });
 
   assert.ok(delivered, 'заказ должен дойти до delivered');
-  assert.match(delivered.delivery.code, /^AAAA-\d{4}$/);
+  assert.match(delivered.delivery.code, /^AAAA-KEY-CS2-PRIME-\d{4}$/);
   assert.equal(delivered.delivery.supplier, 'A');
   assert.ok(delivered.paid_at && delivered.delivered_at);
 });
@@ -76,6 +76,49 @@ test('вебхук с чужой суммой не оплачивает зака
 
   const { body } = await http.get(`/orders/${order.id}`);
   assert.equal(body.status, 'created');
+});
+
+test('вебхук в чужой валюте не оплачивает заказ', async () => {
+  const { body: order } = await http.post('/orders', { sku: 'KEY-CS2-PRIME' });
+  const res = await http.post('/webhook/payment', { ...paidEvent(order.id, order.amount), currency: 'USD' });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.outcome, 'currency_mismatch');
+
+  const { body } = await http.get(`/orders/${order.id}`);
+  assert.equal(body.status, 'created');
+  assert.equal(body.delivery, null);
+});
+
+test('оплата без суммы или без валюты отклоняется с 400, товар не выдаётся', async () => {
+  const { body: order } = await http.post('/orders', { sku: 'KEY-CS2-PRIME' });
+
+  const noAmount = await http.post('/webhook/payment', {
+    event_id: `e_${Math.random().toString(36).slice(2)}`, order_id: order.id,
+    status: 'paid', currency: 'RUB', created_at: new Date().toISOString(),
+  });
+  assert.equal(noAmount.status, 400);
+
+  const noCurrency = await http.post('/webhook/payment', {
+    event_id: `e_${Math.random().toString(36).slice(2)}`, order_id: order.id,
+    status: 'paid', amount: order.amount, created_at: new Date().toISOString(),
+  });
+  assert.equal(noCurrency.status, 400);
+
+  const badAmount = await http.post('/webhook/payment', {
+    ...paidEvent(order.id, order.amount), amount: 'not-a-number',
+  });
+  assert.equal(badAmount.status, 400);
+
+  const noDate = await http.post('/webhook/payment', {
+    event_id: `e_${Math.random().toString(36).slice(2)}`, order_id: order.id,
+    status: 'paid', amount: order.amount, currency: 'RUB',
+  });
+  assert.equal(noDate.status, 400);
+
+  const { body } = await http.get(`/orders/${order.id}`);
+  assert.equal(body.status, 'created');
+  const { rows } = await pool.query('SELECT count(*)::int AS n FROM payment_events WHERE order_id = $1', [order.id]);
+  assert.equal(rows[0].n, 0, 'битые события в журнал не попадают');
 });
 
 test('битый вебхук отклоняется с 400', async () => {

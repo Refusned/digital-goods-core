@@ -47,7 +47,7 @@ test('после пополнения пула фоновая задача са�
     return body.status === 'out_of_stock' ? body : null;
   }, { timeoutMs: 10000 });
 
-  await restock(stack.supplierBase.A, ['RESTOCK-0001', 'RESTOCK-0002']);
+  await restock(stack.supplierBase.A, 'KEY-CS2-PRIME', ['RESTOCK-0001', 'RESTOCK-0002']);
 
   const delivered = await waitFor(async () => {
     const { body } = await http.get(`/orders/${order.id}`);
@@ -69,8 +69,25 @@ test('после пополнения пула фоновая задача са�
   assert.equal(report.paid_not_delivered.count, 0);
 });
 
+test('сверка честно признаёт систему нездоровой, пока оплаченный заказ не выдан', async () => {
+  const { body: order } = await http.post('/orders', { sku: 'KEY-CS2-PRIME' });
+  await http.post('/webhook/payment', paidEvent(order.id, order.amount));
+
+  await waitFor(async () => {
+    const { body } = await http.get(`/orders/${order.id}`);
+    return body.status === 'out_of_stock' ? body : null;
+  });
+
+  // SLA задаём нулевым, чтобы не ждать: заказ уже просрочен по условиям проверки.
+  const { body: report } = await http.get('/admin/reconciliation?overdue_seconds=0');
+  assert.equal(report.paid_not_delivered.count, 1);
+  assert.equal(report.ledger.balanced, true, 'бухгалтерия при этом сходится');
+  assert.equal(report.healthy, false, 'но операционно система не здорова: деньги взяты, товар не отдан');
+  assert.equal(report.health_details.paid_not_delivered_overdue, 1);
+});
+
 test('десять заказов на два ключа: выдано ровно два, остальные ждут пополнения', async () => {
-  await restock(stack.supplierBase.A, ['PAIR-0001', 'PAIR-0002']);
+  await restock(stack.supplierBase.A, 'KEY-GTA5', ['PAIR-0001', 'PAIR-0002']);
 
   const orders = await Promise.all(
     Array.from({ length: 10 }, () => http.post('/orders', { sku: 'KEY-GTA5' }).then((r) => r.body)),
