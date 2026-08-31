@@ -12,10 +12,21 @@
 import pg from 'pg';
 
 const base = process.env.API_URL || `http://127.0.0.1:${process.env.PORT || 3010}`;
-const db = new pg.Client({ connectionString: process.env.DATABASE_URL || 'postgres://shop:shop@localhost:5442/shop' });
-await db.connect();
+const dbUrl = process.env.DATABASE_URL || 'postgres://shop:shop@localhost:5442/shop';
 
-process.stdout.write('Сценарии выполняются против ЗАПУЩЕННОГО сервера и создают в его базе реальные заказы.\n\n');
+// Скрипт создаёт заказы и расходует ключи поставщиков, поэтому на базе с ценными данными
+// он работать не должен. Осознанный запуск разрешается флагом.
+if (process.env.ALLOW_DESTRUCTIVE_RACE !== '1') {
+  process.stderr.write(
+    'npm run race меняет данные: создаёт заказы и расходует ключи поставщиков.\n' +
+    'Запускайте его на демонстрационной базе и подтвердите намерение:\n' +
+    '  ALLOW_DESTRUCTIVE_RACE=1 npm run race\n',
+  );
+  process.exit(2);
+}
+
+const db = new pg.Client({ connectionString: dbUrl });
+await db.connect();
 
 const post = (path, body, headers = {}) =>
   fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) })
