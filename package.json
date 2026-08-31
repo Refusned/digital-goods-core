@@ -1,0 +1,23 @@
+{
+  "name": "digital-goods-core",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ядро магазина цифровых товаров: заказы, вебхуки оплаты, автоматическая выдача с гарантией exactly-once",
+  "type": "module",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "migrate": "node scripts/migrate.js",
+    "seed": "node scripts/seed.js",
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "race": "node scripts/race-check.js",
+    "bench:catalog": "node scripts/bench-catalog.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "pg": "^8.13.1"
+  }
+}
