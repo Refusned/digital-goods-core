@@ -23,8 +23,10 @@ export async function applyMigrations(runner, dir, log = () => {}) {
     }
     log(`migrate: ${file}\n`);
     const sql = readFileSync(join(dir, file), 'utf8');
-    // Клиент из пула: транзакция должна идти по одному соединению.
-    const client = runner.connect ? await runner.connect() : runner;
+    // Транзакция должна идти по ОДНОМУ соединению. Пул для этого выдаёт клиента,
+    // а отдельный клиент уже им является: повторный connect на нём это ошибка.
+    const isPool = typeof runner.idleCount === 'number';
+    const client = isPool ? await runner.connect() : runner;
     try {
       await client.query('BEGIN');
       await client.query(sql);
@@ -35,7 +37,7 @@ export async function applyMigrations(runner, dir, log = () => {}) {
       await client.query('ROLLBACK').catch(() => {});
       throw err;
     } finally {
-      if (runner.connect) client.release();
+      if (isPool) client.release();
     }
   }
   return applied;
