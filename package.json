@@ -15,7 +15,8 @@
     "test": "node scripts/test.js",
     "race": "node scripts/race-check.js",
     "bench:catalog": "node scripts/bench-catalog.js",
-    "stage2": "node scripts/stage2-check.js"
+    "stage2": "node scripts/stage2-check.js",
+    "crash": "node scripts/crash-recovery.js"
   },
   "dependencies": {
     "express": "^4.21.2",
