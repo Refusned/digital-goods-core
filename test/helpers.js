@@ -1,5 +1,6 @@
 import { createApp } from '../src/app.js';
 import { createSupplierStub } from '../src/suppliers/stub.js';
+import { createPaymentStub } from '../src/payments/stub.js';
 import { pool } from '../src/db.js';
 import { config } from '../src/config.js';
 import { startWorker } from '../src/worker.js';
@@ -19,9 +20,11 @@ export async function startStack({ worker = false, workerIntervalMs = 150 } = {}
   const api = await listen(createApp());
   const stubA = await listen(createSupplierStub({ name: 'A' }));
   const stubB = await listen(createSupplierStub({ name: 'B' }));
+  const payments = await listen(createPaymentStub());
 
   process.env.SUPPLIER_A_URL = `http://127.0.0.1:${portOf(stubA)}`;
   process.env.SUPPLIER_B_URL = `http://127.0.0.1:${portOf(stubB)}`;
+  process.env.PAYMENT_STUB_URL = `http://127.0.0.1:${portOf(payments)}`;
 
   const base = `http://127.0.0.1:${portOf(api)}`;
   const supplierBase = { A: process.env.SUPPLIER_A_URL, B: process.env.SUPPLIER_B_URL };
@@ -30,9 +33,10 @@ export async function startStack({ worker = false, workerIntervalMs = 150 } = {}
   return {
     base,
     supplierBase,
+    paymentBase: process.env.PAYMENT_STUB_URL,
     async stop() {
       if (stopWorker) await stopWorker();
-      for (const s of [api, stubA, stubB]) await new Promise((r) => s.close(r));
+      for (const s of [api, stubA, stubB, payments]) await new Promise((r) => s.close(r));
     },
   };
 }
@@ -61,9 +65,15 @@ async function truncateWithRetry(sql, attempts = 10) {
 
 /** Полная очистка данных перед сценарием. Каталог и склады поставщиков засеваются заново. */
 export async function resetData({ keysA = 5, keysB = 5 } = {}) {
-  await truncateWithRetry('TRUNCATE deliveries, supplier_requests, ledger_entries, payment_events, orders CASCADE');
-  await truncateWithRetry('TRUNCATE supplier_stub.issued');
+  await truncateWithRetry(
+    `TRUNCATE deliveries, supplier_requests, refunds, order_items, ledger_entries, payment_events,
+              order_events, supplier_discrepancies, supplier_sync_state, supplier_rate_limits, orders CASCADE`);
+  await truncateWithRetry('TRUNCATE supplier_stub.issued RESTART IDENTITY');
   await truncateWithRetry('TRUNCATE supplier_stub.keys RESTART IDENTITY');
+  await truncateWithRetry('TRUNCATE payment_stub.refunds');
+  // Журнал разрешений лимитера тоже относится к состоянию сценария: остатки от прошлого
+  // теста съедали бы окно следующего.
+  await truncateWithRetry('TRUNCATE supplier_rate_events');
 
   await pool.query(
     `INSERT INTO products (sku, name, type, price_minor, currency, popularity)

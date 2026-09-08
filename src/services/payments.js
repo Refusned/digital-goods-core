@@ -1,7 +1,9 @@
 import { pool, withTx } from '../db.js';
+import { config } from '../config.js';
 import { log } from '../logger.js';
 import { recordPayment } from './ledger.js';
 import { ApiError } from './orders.js';
+import { EVENT, recordEvent } from './events.js';
 
 const VALID_STATUSES = new Set(['paid', 'failed']);
 const ID_RE = /^[\w.:-]{1,128}$/;
@@ -146,7 +148,23 @@ export async function applyEvent(eventId) {
         `UPDATE orders SET status = 'paid', paid_at = now(), last_error = NULL, updated_at = now() WHERE id = $1`,
         [order.id],
       );
+      // Оплаченные позиции обслуживаются раньше резерва до оплаты, и с этого момента
+      // у них есть срок: заказ обязан дойти до конечного состояния, а не ждать код вечно.
+      await client.query(
+        `UPDATE order_items
+            SET priority = $2,
+                queued_at = COALESCE(queued_at, now()),
+                deadline_at = COALESCE(deadline_at, now() + ($3 || ' milliseconds')::interval),
+                next_attempt_at = NULL,
+                updated_at = now()
+          WHERE order_id = $1 AND status IN ('pending', 'delivering')`,
+        [order.id, config.priority.paid, String(config.delivery.deadlineMs)],
+      );
       await recordPayment(client, order.id, order.amount_minor);
+      await recordEvent(client, {
+        orderId: order.id, type: EVENT.orderPaid, amountMinor: Number(order.amount_minor),
+        payload: { event_id: eventId, currency: order.currency },
+      });
       log.info('payment.applied', { event_id: eventId, order_id: order.id, amount_minor: order.amount_minor });
       return { outcome: await finish('applied'), deliver: true, orderId: order.id };
     }
@@ -163,6 +181,9 @@ export async function applyEvent(eventId) {
       `UPDATE orders SET status = 'payment_failed', last_error = 'payment_failed', updated_at = now() WHERE id = $1`,
       [order.id],
     );
+    await recordEvent(client, {
+      orderId: order.id, type: EVENT.orderPaymentFailed, payload: { event_id: eventId },
+    });
     log.info('payment.failed', { event_id: eventId, order_id: order.id });
     return { outcome: await finish('applied') };
   });

@@ -1,5 +1,6 @@
 import { createApp } from './app.js';
 import { createSupplierStub } from './suppliers/stub.js';
+import { createPaymentStub } from './payments/stub.js';
 import { startWorker } from './worker.js';
 import { config } from './config.js';
 import { log } from './logger.js';
@@ -33,6 +34,12 @@ for (const supplier of [config.suppliers.a, config.suppliers.b]) {
   stub.on('error', onListenError(supplier.port, `поставщик ${supplier.name}`));
   servers.push(stub);
 }
+
+// Заглушка платёжного шлюза: через неё уходят возвраты за невыданные позиции.
+const paymentStub = createPaymentStub()
+  .listen(config.payments.port, () => log.info('payment_stub.listening', { port: config.payments.port }));
+paymentStub.on('error', onListenError(config.payments.port, 'платёжный шлюз'));
+servers.push(paymentStub);
 
 const stopWorker = config.worker.enabled ? startWorker() : null;
 

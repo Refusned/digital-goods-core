@@ -10,10 +10,11 @@
  * DATABASE_URL "перед импортами" не работает. Переменная должна существовать до старта процесса.
  */
 import { spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import pg from 'pg';
 import { config } from '../src/config.js';
+import { applyMigrations } from './lib/migrations.js';
 
 const baseUrl = process.env.DATABASE_URL || config.databaseUrl || 'postgres://shop:shop@localhost:5442/shop';
 
@@ -39,12 +40,9 @@ if (exists.rowCount === 0) {
 }
 await admin.end();
 
-const migrations = join(config.root, 'db', 'migrations');
 const db = new pg.Client({ connectionString: testUrl.toString() });
 await db.connect();
-for (const file of readdirSync(migrations).filter((f) => f.endsWith('.sql')).sort()) {
-  await db.query(readFileSync(join(migrations, file), 'utf8'));
-}
+await applyMigrations(db, join(config.root, 'db', 'migrations'));
 await db.end();
 
 const files = readdirSync(join(config.root, 'test'))

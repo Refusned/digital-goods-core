@@ -28,3 +28,12 @@ process.env.SUPPLIER_TIMEOUT_MS = '400';
 process.env.SUPPLIER_MAX_ATTEMPTS = '3';
 process.env.SUPPLIER_BACKOFF_BASE_MS = '50';
 process.env.OUT_OF_STOCK_RETRY_MS = '250';
+// Лимит поставщика по умолчанию тестам не мешает: сценарии, которым он нужен,
+// выставляют свой через /admin/suppliers/:name/rate-limit.
+process.env.SUPPLIER_RATE_CAPACITY = '1000';
+process.env.SUPPLIER_RATE_WINDOW_MS = '60000';
+// Фоновая сверка с поставщиком по умолчанию выключена: она делает ту же работу, что и
+// ручной прогон /admin/audit/run, но в непредсказуемый момент, и сценарии наблюдали бы
+// не своё состояние, а результат чужого фонового прохода. Тест, которому нужен именно фон,
+// включает её сам.
+process.env.SUPPLIER_RECONCILER_ENABLED = '0';

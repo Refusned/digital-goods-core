@@ -37,6 +37,49 @@ export const config = {
   supplierTimeoutMs: num(process.env.SUPPLIER_TIMEOUT_MS, 1500),
   supplierMaxAttempts: num(process.env.SUPPLIER_MAX_ATTEMPTS, 3),
   supplierBackoffBaseMs: num(process.env.SUPPLIER_BACKOFF_BASE_MS, 200),
+
+  // Заглушка платёжного шлюза: через неё уходят возвраты за невыданные позиции.
+  payments: {
+    port: num(process.env.PAYMENT_STUB_PORT, 3131),
+    get baseUrl() { return process.env.PAYMENT_STUB_URL || `http://127.0.0.1:${this.port}`; },
+    timeoutMs: num(process.env.PAYMENT_TIMEOUT_MS, 1500),
+  },
+
+  // Приоритет обслуживания под лимитом поставщика: деньги покупателя важнее резерва до оплаты.
+  priority: {
+    paid: num(process.env.PRIORITY_PAID, 0),
+    unpaid: num(process.env.PRIORITY_UNPAID, 100),
+  },
+
+  delivery: {
+    // Сколько позиция вправе ждать код, прежде чем её объявят невыдаваемой и вернут деньги.
+    // Бесконечное ожидание это тоже способ потерять деньги покупателя.
+    deadlineMs: num(process.env.DELIVERY_DEADLINE_MS, 120_000),
+    maxItemAttempts: num(process.env.DELIVERY_MAX_ITEM_ATTEMPTS, 8),
+    // Сколько раз подряд разрешено просить у поставщика ЗАМЕНУ негодного кода (дубль, чужой).
+    maxCodeRejections: num(process.env.DELIVERY_MAX_CODE_REJECTIONS, 3),
+    // Сколько позиций диспетчер забирает за один проход.
+    batchSize: num(process.env.DELIVERY_BATCH_SIZE, 40),
+    concurrency: num(process.env.DELIVERY_CONCURRENCY, 8),
+  },
+
+  refunds: {
+    maxAttempts: num(process.env.REFUND_MAX_ATTEMPTS, 20),
+    retryMs: num(process.env.REFUND_RETRY_MS, 2000),
+  },
+
+  // Лимит запросов к поставщику. Известен нам заранее по договору, поэтому мы обязаны
+  // не превышать его сами, а не узнавать об этом из 429.
+  rateLimit: {
+    enabled: process.env.SUPPLIER_RATE_LIMIT_ENABLED !== '0',
+    capacity: num(process.env.SUPPLIER_RATE_CAPACITY, 60),
+    windowMs: num(process.env.SUPPLIER_RATE_WINDOW_MS, 60_000),
+  },
+
+  reconciler: {
+    enabled: process.env.SUPPLIER_RECONCILER_ENABLED !== '0',
+    intervalMs: num(process.env.SUPPLIER_RECONCILER_INTERVAL_MS, 2000),
+  },
   worker: {
     enabled: process.env.WORKER_ENABLED !== '0',
     intervalMs: num(process.env.WORKER_INTERVAL_MS, 1000),

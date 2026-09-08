@@ -173,7 +173,28 @@ test('обрыв соединения после выдачи трактуетс
   const issued = new Map();
   let calls = 0;
 
+  const json = (res, payload) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(payload));
+  };
+
   const evil = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://x');
+
+    // Служебные ручки контракта поставщика этот стенд поддерживает честно:
+    // сломан у него ровно один сценарий, обрыв сокета на выдаче.
+    if (url.pathname === '/verify') {
+      const code = url.searchParams.get('code');
+      return json(res, { status: 'known', code, sku: 'KEY-CS2-PRIME' });
+    }
+    if (url.pathname.startsWith('/issued/')) {
+      const requestId = decodeURIComponent(url.pathname.slice('/issued/'.length));
+      return issued.has(requestId)
+        ? json(res, { status: 'issued', request_id: requestId, code: issued.get(requestId), sku: 'KEY-CS2-PRIME' })
+        : json(res, { status: 'none' });
+    }
+    if (url.pathname === '/stock') return json(res, { items: [] });
+
     let body = '';
     req.on('data', (c) => { body += c; });
     req.on('end', () => {
