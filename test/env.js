@@ -23,11 +23,18 @@ if (!allowed) {
 }
 
 process.env.LOG_LEVEL = process.env.LOG_LEVEL || 'silent';
+
+// Настройки поведения задаются ЖЁСТКО, а не берутся из .env: иначе тест зависит от того,
+// что лежит в окружении конкретного разработчика, и у проверяющего падает то, что работает.
 process.env.WORKER_ENABLED = '0';                  // воркер тесты поднимают точечно
 process.env.SUPPLIER_TIMEOUT_MS = '400';
 process.env.SUPPLIER_MAX_ATTEMPTS = '3';
 process.env.SUPPLIER_BACKOFF_BASE_MS = '50';
 process.env.OUT_OF_STOCK_RETRY_MS = '250';
+process.env.DELIVERY_DEADLINE_MS = '120000';
+process.env.DELIVERY_MAX_ITEM_ATTEMPTS = '8';
+process.env.DELIVERY_MAX_CODE_REJECTIONS = '3';
+process.env.REFUND_RETRY_MS = '300';
 // Лимит поставщика по умолчанию тестам не мешает: сценарии, которым он нужен,
 // выставляют свой через /admin/suppliers/:name/rate-limit.
 process.env.SUPPLIER_RATE_CAPACITY = '1000';

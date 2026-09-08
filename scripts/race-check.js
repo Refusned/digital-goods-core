@@ -51,6 +51,22 @@ const check = (name, ok, details) => {
   process.stdout.write(`${ok ? 'OK  ' : 'FAIL'} ${name} ${JSON.stringify(details)}\n`);
 };
 
+/**
+ * Склад под сценарии.
+ *
+ * Скрипт не должен зависеть от того, что запускали до него: прогон сценариев второго этапа
+ * или предыдущий прогон этого же скрипта расходуют ключи, и тогда проверки гонок падали бы
+ * не потому, что сломаны гарантии, а потому, что выдавать нечего.
+ */
+const SCENARIO_SKUS = ['KEY-CS2-PRIME', 'KEY-GTA5'];
+for (const sku of SCENARIO_SKUS) {
+  const { rows } = await db.query('SELECT COALESCE(available, 0) AS available FROM product_stock WHERE sku = $1', [sku]);
+  const available = Number(rows[0]?.available ?? 0);
+  if (available < 20) {
+    await post(`/admin/stock/${sku}/restock`, { supplier: 'A', count: 20 - available + 10 });
+  }
+}
+
 // --- Сценарий 1: 50 параллельных вебхуков по одному заказу -----------------
 {
   const { body: order } = await post('/orders', { sku: 'KEY-CS2-PRIME' });
